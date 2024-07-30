@@ -1,0 +1,223 @@
+---
+# This playbook automates the deployment and configuration of a Java web application
+
+- name: Automated Deployment and Configuration
+  hosts: hng
+  become: yes  # Use sudo for tasks requiring root privileges
+  
+  tasks:
+    - name: Ensure the hng user exists
+      ansible.builtin.user:
+        name: hng
+        state: present
+        shell: /bin/bash
+        groups: sudo  # Add the user to the sudo group
+
+    - name: Ensure /opt/stage_5b directory exists
+      ansible.builtin.file:
+        path: /opt/stage_5b
+        state: directory
+        owner: hng
+        group: hng
+        mode: '0755'
+
+    - name: Clone the repository
+      ansible.builtin.git:
+        repo: 'https://github.com/hngprojects/hng_boilerplate_java_web.git'
+        dest: /opt/stage_5b
+        version: devops  
+        force: yes
+        #become: yes
+        #become_user: hng
+
+    - name: Update pom.xml 
+      template:
+        src: pom.xml.j2
+        dest: "/opt/stage_5b/pom.xml"
+      become: yes
+      become_user: hng
+  
+    - name: Install PostgreSQL
+      ansible.builtin.apt:
+        name: postgresql
+        state: present
+        update_cache: yes
+
+    - name: Start PostgreSQL service
+      ansible.builtin.service:
+        name: postgresql
+        state: started
+        enabled: yes
+
+    - name: Ensure PostgreSQL is listening on localhost
+      ansible.builtin.lineinfile:
+        path: /etc/postgresql/14/main/postgresql.conf
+        regexp: '^#?listen_addresses ='
+        line: "listen_addresses = 'localhost'"
+      notify: Restart PostgreSQL
+
+    - name: Create PostgreSQL database
+      become_user: postgres
+      community.postgresql.postgresql_db:
+        name: app  # Replace with your database name
+        state: present
+
+    - name: Generate PostgreSQL admin password
+      set_fact:
+        db_password: "{{ lookup('password', '/dev/null length=16 chars=ascii_letters') }}"
+   
+    - name: Set PostgreSQL admin password environment variable
+      lineinfile:
+        path: /etc/environment
+        line: 'POSTGRES_PASSWORD={{ db_password }}'
+
+    - name: Create PostgreSQL user
+      become_user: postgres
+      community.postgresql.postgresql_user:
+        name: admin
+        password: "{{ db_password }}"
+        state: present
+        expires: "infinity"
+
+
+    - name: Grant all privileges on database to user
+      become_user: postgres
+      community.postgresql.postgresql_privs:
+        db: app
+        role: admin
+        privs: ALL
+        type: database
+        state: present
+    - name: Ensure /var/secrets directory exists
+      ansible.builtin.file:
+        path: /var/secrets
+        state: directory
+        owner: postgres
+        group: postgres
+        mode: '0700'
+
+    - name: Save PostgreSQL admin credentials
+      ansible.builtin.copy:
+        content: "admin:{{ db_password }}"
+        dest: /var/secrets/pg_pw.txt
+        owner: postgres
+        group: postgres
+        mode: '0600'
+    
+
+    - name: Install application dependencies
+      ansible.builtin.apt:
+        name: "{{ item }}"
+        state: present
+      loop:
+        - openjdk-17-jdk
+        - maven
+        - rabbitmq-server
+
+    - name: Ensure RabbitMQ is running
+      ansible.builtin.service:
+        name: rabbitmq-server
+        state: started
+        enabled: yes
+
+    - name: Resolve Maven dependencies
+      command: mvn dependency:resolve
+      args:
+        chdir: /opt/stage_5b
+
+    - name: Copy application.properties file
+      template:
+        src: application.properties.j2
+        dest: /opt/stage_5b/src/main/resources/application.properties    
+
+    - name: Build the Spring Boot application
+      command: mvn clean package
+      args:
+        chdir: /opt/stage_5b
+      environment: 
+        POSTGRES_PASSWORD: "{{ db_password }}"
+
+   # - name: Run the Spring Boot application
+    #  command: mvn spring-boot:run
+      #shell: "nohup java -jar /opt/stage_5b/target/your-app.jar > /var/log/stage_5b/out.log 2> /var/log/stage_5b/error.log &"
+     # args:
+      #  chdir: /opt/stage_5b
+
+    - name: Install Nginx
+      ansible.builtin.apt:
+        name: nginx
+        state: present
+        update_cache: yes
+
+    - name: Configure Nginx
+      ansible.builtin.template:
+        src: nginx.conf.j2
+        dest: /etc/nginx/sites-available/default
+        mode: '0644'
+
+    - name: Restart Nginx
+      ansible.builtin.systemd:
+        name: nginx
+        state: restarted
+
+    - name: Ensure /var/log/stage_5b directory exists
+      ansible.builtin.file:
+        path: /var/log/stage_5b
+        state: directory
+        owner: hng
+        group: hng
+
+    - name: Configure stderr log
+      ansible.builtin.file:
+        path: /var/log/stage_5b/error.log
+        state: touch
+        owner: hng
+        group: hng
+        mode: '0644'
+
+    - name: Configure stdout log
+      ansible.builtin.file:
+        path: /var/log/stage_5b/out.log
+        state: touch
+        owner: hng
+        group: hng
+        mode: '0644'
+
+    - name: Create systemd service file for Java application
+      ansible.builtin.copy:
+        dest: /etc/systemd/system/sysd-java.service
+        content: |
+          [Unit]
+          Description=Java Web Application Service
+          After=network.target
+
+          [Service]
+          User=hng
+          WorkingDirectory=/opt/stage_5b
+          ExecStart=/usr/bin/java -jar /opt/stage_5b/target/hng-java-boilerplate-0.0.1-SNAPSHOT.jar
+          EnvironmentFile= /etc/environment
+          StandardOutput=append:/var/log/stage_5b/out.log
+          StandardError=append:/var/log/stage_5b/error.log
+          Restart=always
+
+          [Install]
+          WantedBy=multi-user.target
+      notify:
+        - Reload systemd
+        - Restart sysd-java
+
+  handlers:
+    - name: Restart PostgreSQL
+      ansible.builtin.service:
+        name: postgresql
+        state: restarted
+
+    - name: Reload systemd
+      ansible.builtin.systemd:
+        daemon_reload: yes
+
+    - name: Restart sysd-java
+      ansible.builtin.systemd:
+        name: sysd-java
+        state: restarted
+
