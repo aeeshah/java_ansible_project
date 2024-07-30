@@ -3,7 +3,7 @@
 
 - name: Automated Deployment and Configuration
   hosts: hng
-  become: yes  # Use sudo for tasks requiring root privileges
+  become: yes  
   
   tasks:
     - name: Ensure the hng user exists
@@ -11,7 +11,7 @@
         name: hng
         state: present
         shell: /bin/bash
-        groups: sudo  # Add the user to the sudo group
+        groups: sudo  
 
     - name: Ensure /opt/stage_5b directory exists
       ansible.builtin.file:
@@ -125,7 +125,7 @@
       args:
         chdir: /opt/stage_5b
 
-    - name: Copy application.properties file
+    - name: Copy application.properties 
       template:
         src: application.properties.j2
         dest: /opt/stage_5b/src/main/resources/application.properties    
@@ -204,20 +204,34 @@
           WantedBy=multi-user.target
       notify:
         - Reload systemd
-        - Restart sysd-java
+        - Ensure the service is enabled and started
+        - Restart PostgreSQL
+
+    - name: Check if the service is active
+      ansible.builtin.command:
+        cmd: systemctl is-active sysd-java.service
+      register: service_status
+      failed_when: false
+    - name: Ensure the service is started if not active
+      ansible.builtin.systemd:
+        name: sysd-java.service
+        state: started
+      when: service_status.stdout != 'active'
 
   handlers:
-    - name: Restart PostgreSQL
-      ansible.builtin.service:
-        name: postgresql
-        state: restarted
 
     - name: Reload systemd
       ansible.builtin.systemd:
         daemon_reload: yes
 
-    - name: Restart sysd-java
-      ansible.builtin.systemd:
-        name: sysd-java
+    - name: Restart PostgreSQL
+      ansible.builtin.service:
+        name: postgresql
         state: restarted
+
+    - name:  Ensure the service is enabled and started
+      ansible.builtin.systemd:
+        name: sysd-java.service
+        enabled: yes
+        state: started
 
